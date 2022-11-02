@@ -53,8 +53,8 @@ func AskTask(mf func(string, string) []KeyValue,
 			ttype:   ReduceT,
 			reducef: rf,
 		}
-	case Finish: 
-		task = nil
+// 	case Finish: 
+// 		task = nil
 	default:
 		fmt.Println("getTask error")
 	}
