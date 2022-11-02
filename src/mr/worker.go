@@ -1,10 +1,11 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,6 +25,56 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func AskTask(mf func(string, string) []KeyValue,
+	rf func(string, []string) string) Task {
+	args := WorkerArgs{}
+	reply := WorkerReply{}
+	ok := call("Coordinator.GetTask", &args, &reply)
+
+	if !ok {
+		fmt.Printf("AskTask call failed!\n")
+		return nil
+	}
+	var task Task = nil
+	switch reply.Type {
+	case MapT:
+		// fmt.Printf("[RecvTask]: map%d FileName is %s\n", reply.TaskId, reply.FileName)
+		task = &MapTask{
+			infile:  reply.FileName,
+			TaskId:  reply.TaskId,
+			nReduce: reply.FileNum,
+			ttype:   MapT,
+			mapf:    mf,
+		}
+	case ReduceT:
+		task = &ReduceTask{
+			TaskId:  reply.TaskId,
+			nMap:    reply.FileNum,
+			ttype:   ReduceT,
+			reducef: rf,
+		}
+	case Finish: // 使用waitgroup,可能不会出现这种情况
+		task = nil
+	default:
+		fmt.Println("error")
+	}
+	
+	return task
+}
+
+func FinishTask(task Task) {
+	args := WorkerArgs{
+		Type:   task.GetType(),
+		TaskId: task.GetId(),
+	}
+	reply := WorkerReply{}
+	ok := call("Coordinator.TaskFinish", &args, &reply)
+	if ok {
+		// fmt.Printf("[WFIN]:Worker%d-%d Task call succeed!\n", args.Type, args.TaskId)
+	}else {
+		fmt.Printf("[WFIN]:Worker%d-%d Task call failed!\n", args.Type, args.TaskId)
+	}
+}
 
 //
 // main/mrworker.go calls this function.
@@ -35,7 +86,15 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
-
+	for {
+		if task := AskTask(mapf, reducef); task != nil {
+			// fmt.Printf("[WGet]:Worker%d-%d get task succed\n", task.GetType(),task.GetId())
+			task.Run()
+			FinishTask(task)
+		} else {
+			break
+		}
+	}
 }
 
 //
@@ -86,6 +145,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	fmt.Println("call error:", err)
 	return false
 }
