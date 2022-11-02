@@ -53,12 +53,11 @@ func AskTask(mf func(string, string) []KeyValue,
 			ttype:   ReduceT,
 			reducef: rf,
 		}
-	case Finish: // 使用waitgroup,可能不会出现这种情况
+	case Finish: 
 		task = nil
 	default:
-		fmt.Println("error")
+		fmt.Println("getTask error")
 	}
-	
 	return task
 }
 

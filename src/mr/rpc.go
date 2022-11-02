@@ -116,7 +116,6 @@ func (mt *MapTask) Run() {
 				break
 			}
 		}
-		// enc.Encode(&bucket[i]) 得每个kv的encode
 		ofile.Close()
 	}
 }
@@ -168,15 +167,9 @@ func (rt *ReduceTask) Run() {
 
 	sort.Sort(ByKey(kva))
 
-	dir, _ := os.Getwd()
-	tfname := fmt.Sprintf("mr-tmp-%d", rt.TaskId)
-	tempf, err := ioutil.TempFile(dir,tfname)
-	if err != nil {
-		log.Fatal("Failed to create temp file", err)
-	}
-
-	// oname := fmt.Sprintf("mr-out-%d", rt.TaskId)
-	// ofile, _ := os.Create(oname)
+	// 对于crash的情况清空上次写的内容
+	oname := fmt.Sprintf("mr-out-%d", rt.TaskId)
+	ofile, _ := os.Create(oname) // create：文件存在则清空文件内容，
 
 	i := 0
 	for i < len(kva) {
@@ -190,13 +183,10 @@ func (rt *ReduceTask) Run() {
 		}
 		output := rt.reducef(kva[i].Key, values)
 		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(tempf, "%v %v\n", kva[i].Key, output)
+		fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
 		i = j
 	}
-	tempf.Close()
-
-	oname := fmt.Sprintf("mr-out-%d", rt.TaskId)
-	os.Rename(tempf.Name(), oname)
+	ofile.Close()
 }
 func (rt *ReduceTask) GetId() int {
 	return rt.TaskId
