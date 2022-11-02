@@ -32,10 +32,10 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-// GetTask :先分配map，map全部执行完后再分配reduce，
-// 这里使用waitgroup屏障，使map->reduce任务间执行顺序串行
+// GetTask :先分配map，map全部执行完后再分配reduce，reduce全部执行完才退出程序
+// 这里使用once.Do,配合原子操作cnt，实现类似WaitGroup协程屏障
 func (c *Coordinator) makeReply(task Task) WorkerReply {
-	// mtx.Lock() // 是否需要锁?
+	// mtx.Lock()
 	// defer mtx.Unlock()
 	
 	tid := task.GetId()
@@ -93,21 +93,21 @@ func (c *Coordinator) GetTask(args *WorkerArgs, reply *WorkerReply) error {
 			return nil
 		}
 	}
-	if c.Status == FINISH {
-		reply.Type = Finish
-	}
-	// 没有任务，直接返回nil
+// 	if c.Status == FINISH {
+// 		reply.Type = Finish
+// 	}
+	// FINISH，直接返回nil
 	return nil
 }
 
 func (c *Coordinator) TaskFinish(args *WorkerArgs, reply *WorkerReply) error {
 	// mtx.Lock()
 	// defer mtx.Unlock()
-
+	// 因为channel的原因taskId在外面不存在并发抢占，任务相关的资源不用加锁
 	var taskId = args.TaskId
 	var taskT = args.Type
 	if c.Status == MapP && taskT == MapT &&
-		c.mapDDL[taskId] != Boundary {  // 这里需要worker和master任务对应（处理超时返回的情况
+		c.mapDDL[taskId] != Boundary {  // Task对应master当前phrase，且回复时没有超时
 		
 		c.mapDDL[taskId] = Boundary 	//DDL设置为固定值Boundary，表示任务完成
 		atomic.AddInt32(&c.mFinCnt, 1)	// 完成一个任务,cnt++
@@ -148,8 +148,8 @@ func (c *Coordinator) pushTask(task Task) {
 }
 
 // HandleCrash
-// 如果crash则不会调用TaskFinish，少提交一个done会导致GetTask都阻塞在wg.Wait
-// 后台开启crash监测
+// 后台开启crash监测，当任务超时重新加入队列，
+// 队列有元素后，会唤醒处理call的协程
 func (c *Coordinator) HandleCrash() {
 	// 超时的任务重新入队
 	checkTimeout := func(DDL []time.Time) int {
@@ -161,7 +161,7 @@ func (c *Coordinator) HandleCrash() {
 		return -1
 	}
 	for {
-		time.Sleep(time.Second * 1) // 2s检查一次
+		time.Sleep(time.Second * 1) // 1s检查一次
 		if c.Status == MapP {
 			if tid := checkTimeout(c.mapDDL); tid != -1 {
 				c.pushTask(&MapTask{infile: c.mInputs[tid], TaskId: tid})	
