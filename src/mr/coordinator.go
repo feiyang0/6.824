@@ -12,20 +12,18 @@ import (
 	"time"
 )
 
-var mtx sync.Mutex
-
+// var mtx sync.Mutex
 type Coordinator struct {
-	nReduce int
-	// 任务发布或者重做
+	// 任务发布
 	mapQueue    chan Task
 	reduceQueue chan Task
 	mInputs     []string
+	nReduce     int
 	// 记录任务完成情况
 	mFinCnt		int32
 	rFinCnt		int32
-
+	// 当前执行阶段
 	Status   Period
-
 	// 超时时间
 	mapDDL    []time.Time
 	reduceDDL []time.Time
@@ -58,19 +56,10 @@ func (c *Coordinator) makeReply(task Task) WorkerReply {
 var once1, once2 sync.Once
 func (c *Coordinator) GetTask(args *WorkerArgs, reply *WorkerReply) error {
 	
-	// 全部map完成后,进入下一个阶段,once.Do对reduce任务初始化一次
-	if c.mFinCnt == int32(len(c.mInputs)) { 
-		once1.Do(func(){	// 类似waitGroup屏障的作用，切换任务后，关闭管道
-			c.Status = ReduceP
-			close(c.mapQueue)
-			c.initReduce()
-			// fmt.Println("[PeriodChange]")
-		})
-	}
-	// 由于crash导致部分任务任务没有完成,
-	// 虽然还停留在当前阶段,但是没有任务可取
-	// 在没有任务时会休眠等待,
-	// 当crash_handler协程重新加入任务时唤醒
+	// 由于crash使部分任务没有提交，或者有些worker取任务时任务已经发送完,
+	// 虽然还停留在当前阶段,但是没有任务可取，worker在没有任务时会休眠等待,
+	// 当crash_handler协程重新加入任务时唤醒，
+	// 或者cnt到达预期值后进入下一个阶段并关闭channel
 	if c.Status == MapP {
 		if task, ok := <-c.mapQueue; ok {
 			*reply = c.makeReply(task)
@@ -78,14 +67,7 @@ func (c *Coordinator) GetTask(args *WorkerArgs, reply *WorkerReply) error {
 			return nil
 		}
 	}
-	// reduce 也要一起退出(reduce parallelism test)
-	if c.rFinCnt == int32(c.nReduce) {  
-		once2.Do(func(){ 
-			c.Status = FINISH
-			close(c.reduceQueue)
-		})
-	}
-
+	// 这里不要else if, MapP解除阻塞后，刚好进入ReduceP阶段
 	if c.Status == ReduceP {
 		if task, ok := <-c.reduceQueue; ok {
 			*reply = c.makeReply(task)
@@ -93,9 +75,6 @@ func (c *Coordinator) GetTask(args *WorkerArgs, reply *WorkerReply) error {
 			return nil
 		}
 	}
-// 	if c.Status == FINISH {
-// 		reply.Type = Finish
-// 	}
 	// FINISH，直接返回nil
 	return nil
 }
@@ -103,7 +82,7 @@ func (c *Coordinator) GetTask(args *WorkerArgs, reply *WorkerReply) error {
 func (c *Coordinator) TaskFinish(args *WorkerArgs, reply *WorkerReply) error {
 	// mtx.Lock()
 	// defer mtx.Unlock()
-	// 因为channel的原因taskId在外面不存在并发抢占，任务相关的资源不用加锁
+	// 因为channel的原因taskId在外面不存在并发抢占，任务id相关的资源不用加锁
 	var taskId = args.TaskId
 	var taskT = args.Type
 	if c.Status == MapP && taskT == MapT &&
@@ -122,36 +101,46 @@ func (c *Coordinator) TaskFinish(args *WorkerArgs, reply *WorkerReply) error {
 		
 		// fmt.Printf("[TaskFin]: reduce tasks[%d] finish\n", taskId)
 	}
-	// mtx.Lock()
-	
-	// defer mtx.Unlock()
+	// 全部map完成后,进入下一个阶段,once.Do保证任务初始化，close关闭只执行一次
+	if c.mFinCnt == int32(len(c.mInputs)) { 
+		once1.Do(func(){
+			c.Status = ReduceP
+			close(c.mapQueue) // 关闭channel解除卡在getTask处的阻塞
+			c.initReduce()
+			// fmt.Println("[PeriodChange]")
+		})
+	}
+	// reduce 也要一起退出(reduce parallelism test)
+	if c.rFinCnt == int32(c.nReduce) {  
+		once2.Do(func(){ 
+			c.Status = FINISH
+			close(c.reduceQueue)
+		})
+	}
 	return nil
 }
 
-func (c *Coordinator) setTime(tid int) {
-	mtx.Lock()
-	defer mtx.Unlock()
-	if c.Status == MapP {
-		c.mapDDL[tid] = time.Now().Add(time.Hour * 24)
-	}else {
-		c.reduceDDL[tid] = time.Now().Add(time.Hour * 24)
-	}
-}
+// 向channel添加任务，并初始化时间
+// 这里不用加锁：pushTask在init和后台crash处有使用
+// initmap在master开始时调用,initreduce有once.do执行
+// crash单协程添加,所以都不存在并发抢占
 func (c *Coordinator) pushTask(task Task) {
+	tid := task.GetId()
 	if c.Status == MapP {
 		// fmt.Printf("[PushTask]: map%d FileName is %s\n",task.GetId(), task.GetInFile())
 		c.mapQueue <- task
+		c.mapDDL[tid] = time.Now().Add(time.Hour * 24)
 	} else {
 		c.reduceQueue <- task
+		c.reduceDDL[tid] = time.Now().Add(time.Hour * 24)
 	}
-	c.setTime(task.GetId())
 }
 
 // HandleCrash
 // 后台开启crash监测，当任务超时重新加入队列，
 // 队列有元素后，会唤醒处理call的协程
 func (c *Coordinator) HandleCrash() {
-	// 超时的任务重新入队
+	// 取出超时任务，没有返回-1
 	checkTimeout := func(DDL []time.Time) int {
 		for tid, ddl := range DDL {
 			if ddl.Before(time.Now()) && ddl != Boundary {
@@ -160,6 +149,7 @@ func (c *Coordinator) HandleCrash() {
 		}
 		return -1
 	}
+	// 超时的任务重新入队
 	for {
 		time.Sleep(time.Second * 1) // 1s检查一次
 		if c.Status == MapP {
